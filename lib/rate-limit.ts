@@ -1,27 +1,27 @@
-import type { NextRequest } from "next/server"
+import { NextRequest } from 'next/server'
+import { RateLimitResult } from './types'
 
-interface RateLimitResult {
-  success: boolean
-  remaining: number
-  reset: number
-}
-
-// Simple in-memory rate limiting (use Redis in production)
+// Simple in-memory rate limiter (use Redis in production)
 const requests = new Map<string, { count: number; reset: number }>()
 
-export async function rateLimit(req: NextRequest, limit = 100): Promise<RateLimitResult> {
-  const ip = req.ip || req.headers.get("x-forwarded-for") || "anonymous"
+export async function rateLimit(
+  req: NextRequest,
+  limit = 10,
+  windowMs = 60 * 1000 // 1 minute
+): Promise<RateLimitResult> {
+  const ip = req.ip || req.headers.get('x-forwarded-for') || 'anonymous'
   const now = Date.now()
-  const windowMs = 60 * 1000 // 1 minute window
+  const windowStart = Math.floor(now / windowMs) * windowMs
+  const key = `${ip}:${windowStart}`
 
-  const key = `${ip}:${Math.floor(now / windowMs)}`
-  const current = requests.get(key) || { count: 0, reset: now + windowMs }
+  const current = requests.get(key) || { count: 0, reset: windowStart + windowMs }
 
   if (current.count >= limit) {
     return {
       success: false,
       remaining: 0,
-      reset: current.reset,
+      reset: new Date(current.reset),
+      limit,
     }
   }
 
@@ -38,6 +38,15 @@ export async function rateLimit(req: NextRequest, limit = 100): Promise<RateLimi
   return {
     success: true,
     remaining: limit - current.count,
-    reset: current.reset,
+    reset: new Date(current.reset),
+    limit,
+  }
+}
+
+export function getRateLimitHeaders(result: RateLimitResult): Record<string, string> {
+  return {
+    'X-RateLimit-Limit': result.limit.toString(),
+    'X-RateLimit-Remaining': result.remaining.toString(),
+    'X-RateLimit-Reset': result.reset.toISOString(),
   }
 }

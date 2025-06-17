@@ -1,125 +1,211 @@
-"use client"
+'use client'
 
-import type React from "react"
+import { useState, useRef, useEffect } from 'react'
+import { useChat } from 'ai/react'
+import { ChatMessage } from './chat-message'
+import { ChatInput } from './chat-input'
+import { ChatHeader } from './chat-header'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import { Button } from '@/components/ui/button'
+import { useChatStore } from '@/lib/chat-store'
+import { useAssistantStore } from '@/lib/store'
+import { extractCodeBlocks, generateFileStructure } from '@/lib/code-parser'
+import { toast } from 'sonner'
+import { Loader2, RotateCcw, Trash2 } from 'lucide-react'
+import type { SandpackFiles } from '@/lib/types'
 
-import { useChat } from "ai/react"
-import { useState, useRef, useEffect } from "react"
-import { MessageList } from "./message-list"
-import { ChatInput } from "./chat-input"
-import { TypingIndicator } from "./typing-indicator"
-import { ChatControls } from "./chat-controls"
-import { useToast } from "@/hooks/use-toast"
-import { useChatSettings } from "@/hooks/use-chat-settings"
+interface ChatInterfaceProps {
+  onCodeGenerated: (files: SandpackFiles) => void
+  currentFiles: Record<string, string>
+  activeFile: string
+}
 
-export function ChatInterface() {
-  const { toast } = useToast()
-  const { settings } = useChatSettings()
-  const [isTyping, setIsTyping] = useState(false)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+export function ChatInterface({ onCodeGenerated, currentFiles, activeFile }: ChatInterfaceProps) {
+  const scrollAreaRef = useRef<HTMLDivElement>(null)
+  const { conversations, activeConversationId, createConversation, addMessage } = useChatStore()
+  const { getEditorContext } = useAssistantStore()
+  
+  const {
+    messages,
+    input,
+    handleInputChange,
+    handleSubmit,
+    isLoading,
+    error,
+    reload,
+    stop,
+    setMessages,
+  } = useChat({
+    api: '/api/chat',
+    onResponse: (response) => {
+      if (!response.ok) {
+        toast.error('Failed to get response from AI')
+      }
+    },
+    onFinish: (message) => {
+      // Extract code blocks and update files
+      const codeBlocks = extractCodeBlocks(message.content)
+      if (codeBlocks.length > 0) {
+        const files = generateFileStructure(codeBlocks)
+        onCodeGenerated(files)
+        toast.success(`Generated ${Object.keys(files).length} file(s)`)
+      }
+      
+      // Save to conversation history
+      addMessage(activeConversationId, {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        timestamp: new Date(),
+      })
+    },
+    onError: (error) => {
+      console.error('Chat error:', error)
+      toast.error('An error occurred while processing your request')
+    },
+    body: {
+      context: getEditorContext(activeFile),
+    },
+  })
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, error, reload, stop, append, setMessages } =
-    useChat({
-      api: "/api/chat/google",
-      onError: (error) => {
-        toast({
-          title: "Error",
-          description: error.message,
-          variant: "destructive",
-        })
-      },
-      onResponse: () => {
-        setIsTyping(false)
-      },
-      onFinish: (message) => {
-        // Log conversation for analytics
-        logConversation(message)
-      },
-    })
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }
-
+  // Auto-scroll to bottom
   useEffect(() => {
-    scrollToBottom()
+    if (scrollAreaRef.current) {
+      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
+    }
   }, [messages])
 
-  const handleFormSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!input.trim()) return
-
-    setIsTyping(true)
-    await handleSubmit(e)
+  const handleClearChat = () => {
+    setMessages([])
+    toast.success('Chat cleared')
   }
 
-  const logConversation = async (message: any) => {
-    try {
-      await fetch("/api/analytics/log", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          timestamp: new Date().toISOString(),
-          settings,
-        }),
-      })
-    } catch (error) {
-      console.error("Failed to log conversation:", error)
+  const handleRetry = () => {
+    if (messages.length > 0) {
+      reload()
     }
+  }
+
+  const handleStop = () => {
+    stop()
+    toast.info('Generation stopped')
+  }
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!input.trim() || isLoading) return
+    
+    // Add user message to conversation
+    addMessage(activeConversationId, {
+      id: crypto.randomUUID(),
+      role: 'user',
+      content: input,
+      timestamp: new Date(),
+    })
+    
+    handleSubmit(e)
   }
 
   return (
-    <div className="flex flex-col h-full">
-      <ChatControls onClear={() => setMessages([])} onReload={reload} onStop={stop} isLoading={isLoading} />
-
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        <MessageList messages={messages} />
-        {isTyping && <TypingIndicator />}
-        <div ref={messagesEndRef} />
-      </div>
-
+    <div className="h-full flex flex-col bg-card">
+      <ChatHeader 
+        onClear={handleClearChat}
+        onNewConversation={() => createConversation()}
+        messageCount={messages.length}
+      />
+      
+      <ScrollArea ref={scrollAreaRef} className="flex-1 p-4">
+        <div className="space-y-4">
+          {messages.length === 0 ? (
+            <div className="text-center text-muted-foreground py-8">
+              <div className="text-lg font-medium mb-2">Welcome to AI Coding Assistant</div>
+              <p className="text-sm">
+                Ask me to generate, explain, debug, or optimize code. I can help with multiple programming languages and frameworks.
+              </p>
+            </div>
+          ) : (
+            messages.map((message) => (
+              <ChatMessage
+                key={message.id}
+                message={message}
+                onCodeInsert={(code, filename) => {
+                  onCodeGenerated({ [filename]: code })
+                  toast.success(`Code inserted into ${filename}`)
+                }}
+              />
+            ))
+          )}
+          
+          {isLoading && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>AI is thinking...</span>
+            </div>
+          )}
+          
+          {error && (
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+              <div className="text-destructive font-medium mb-2">Error</div>
+              <p className="text-sm text-destructive/80">{error.message}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRetry}
+                className="mt-2"
+              >
+                <RotateCcw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+      
       <div className="border-t p-4">
+        <div className="flex gap-2 mb-3">
+          {isLoading && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleStop}
+            >
+              Stop
+            </Button>
+          )}
+          
+          {messages.length > 0 && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRetry}
+                disabled={isLoading}
+              >
+                <RotateCcw className="h-4 w-4 mr-2" />
+                Retry
+              </Button>
+              
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleClearChat}
+                disabled={isLoading}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Clear
+              </Button>
+            </>
+          )}
+        </div>
+        
         <ChatInput
           input={input}
-          handleInputChange={handleInputChange}
-          handleSubmit={handleFormSubmit}
+          onInputChange={handleInputChange}
+          onSubmit={onSubmit}
           isLoading={isLoading}
-          onFileUpload={(files) => {
-            // Handle file uploads for multimodal chat
-            handleFileUpload(files, append)
-          }}
+          placeholder="Ask me to generate, explain, debug, or optimize code..."
         />
       </div>
-
-      {error && (
-        <div className="p-4 bg-destructive/10 border-t border-destructive/20">
-          <p className="text-sm text-destructive">Error: {error.message}</p>
-        </div>
-      )}
     </div>
   )
-}
-
-async function handleFileUpload(files: FileList, append: Function) {
-  for (const file of Array.from(files)) {
-    if (file.type.startsWith("image/")) {
-      const base64 = await fileToBase64(file)
-      append({
-        role: "user",
-        content: [
-          { type: "text", text: "Please analyze this image:" },
-          { type: "image", image: base64 },
-        ],
-      })
-    }
-  }
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.readAsDataURL(file)
-    reader.onload = () => resolve(reader.result as string)
-    reader.onerror = reject
-  })
 }
